@@ -13,3 +13,7 @@
 /*.bit
 /*.json
 /*.csv
+
+/outputs/*
+/result
+/result-*
