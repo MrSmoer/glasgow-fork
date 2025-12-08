@@ -12,16 +12,14 @@ from amaranth.lib.wiring import In, Out
 
 from glasgow.support.logging import dump_hex
 from glasgow.abstract import AbstractAssembly, GlasgowPin, PullState, ClockDivisor
-from glasgow.gateware.i2c import I2CInitiator
+from glasgow.gateware._1wire import Bus1WireController
 from glasgow.applet import GlasgowAppletError, GlasgowAppletV2
 
-
-__all__ = ["I2CNotAcknowledged", "I2CControllerInterface", "PullState"]
+__all__ = ["Bus1WireControllerInterface", "PullState"]
 
 
 class I2CNotAcknowledged(GlasgowAppletError):
     pass
-
 
 class _Command(enum.Enum, shape=8):
     Start = 0x00
@@ -30,11 +28,13 @@ class _Command(enum.Enum, shape=8):
     Read  = 0x03
 
 
-class I2CControllerComponent(wiring.Component):
+class Bus1WireControllerComponent(wiring.Component):
     i_stream: In(stream.Signature(8))
     o_stream: Out(stream.Signature(8))
 
     divisor: In(16)
+    pulsetimer_value: In(16, init = 10)
+
 
     def __init__(self, ports):
         self._ports = ports
@@ -44,8 +44,9 @@ class I2CControllerComponent(wiring.Component):
     def elaborate(self, platform):
         m = Module()
 
-        m.submodules.ctrl = ctrl = I2CInitiator(self._ports, 0)
-        m.d.comb += ctrl.divisor.eq(self.divisor)
+        m.submodules.ctrl = ctrl = Bus1WireController(self._ports, 0, 2)
+        m.d.comb += ctrl.bus.divisor.eq(self.divisor)
+        m.d.comb += ctrl.pulsetimer_value.eq(self.pulsetimer_value)
 
         cmd   = Signal(_Command)
         count = Signal(16)
@@ -60,10 +61,10 @@ class I2CControllerComponent(wiring.Component):
             with m.State("COMMAND"):
                 with m.Switch(cmd):
                     with m.Case(_Command.Start):
-                        m.d.comb += ctrl.start.eq(1)
+                        # m.d.comb += ctrl.start.eq(1)
                         m.next = "SYNC"
                     with m.Case(_Command.Stop):
-                        m.d.comb += ctrl.stop.eq(1)
+                        # m.d.comb += ctrl.stop.eq(1)
                         m.next = "SYNC"
                     with m.Case(_Command.Write, _Command.Read):
                         m.next = "COUNT"
@@ -90,7 +91,7 @@ class I2CControllerComponent(wiring.Component):
             with m.State("WRITE-FIRST"):
                 with m.If(self.i_stream.valid):
                     m.d.comb += self.i_stream.ready.eq(1)
-                    m.d.comb += ctrl.data_i.eq(self.i_stream.payload)
+                    m.d.comb += ctrl.data_o.eq(self.i_stream.payload[0])
                     m.d.comb += ctrl.write.eq(1)
                     m.next = "WRITE-ACK"
 
@@ -105,7 +106,7 @@ class I2CControllerComponent(wiring.Component):
                     m.next = "REPORT"
                 with m.Elif(self.i_stream.valid):
                     m.d.comb += self.i_stream.ready.eq(1)
-                    m.d.comb += ctrl.data_i.eq(self.i_stream.payload)
+                    m.d.comb += ctrl.data_o.eq(self.i_stream.payload[0])
                     m.d.comb += ctrl.write.eq(1)
                     m.next = "WRITE-ACK"
 
@@ -120,7 +121,7 @@ class I2CControllerComponent(wiring.Component):
                         m.next = "IDLE"
 
             with m.State("READ-FIRST"):
-                m.d.comb += ctrl.ack_i.eq(count != 1)
+                # m.d.comb += ctrl.ack_i.eq(count != 1)
                 m.d.comb += ctrl.read.eq(1)
                 m.d.sync += count.eq(count - 1)
                 m.next = "READ"
@@ -128,30 +129,31 @@ class I2CControllerComponent(wiring.Component):
             with m.State("READ"):
                 with m.If(~ctrl.busy):
                     m.d.comb += self.o_stream.valid.eq(1)
-                    m.d.comb += self.o_stream.payload.eq(ctrl.data_o)
+                    m.d.comb += self.o_stream.payload[0].eq(ctrl.data_i)
                     with m.If(self.o_stream.ready):
                         with m.If(count == 0):
                             m.next = "IDLE"
                         with m.Else():
-                            m.d.comb += ctrl.ack_i.eq(count != 1)
+                            # m.d.comb += ctrl.ack_i.eq(count != 1)
                             m.d.comb += ctrl.read.eq(1)
                             m.d.sync += count.eq(count - 1)
 
         return m
 
 
-class I2CControllerInterface:
+class Bus1WireControllerInterface:
     def __init__(self, logger: logging.Logger, assembly: AbstractAssembly, *,
-                 scl: GlasgowPin, sda: GlasgowPin):
+                 data_pin: GlasgowPin):
         self._logger = logger
         self._level  = logging.DEBUG if self._logger.name == __name__ else logging.TRACE
 
-        assembly.use_pulls({scl: "high", sda: "high"})
-        ports = assembly.add_port_group(scl=scl, sda=sda)
-        component = assembly.add_submodule(I2CControllerComponent(ports))
+        assembly.use_pulls({data_pin: "high"})
+        ports = assembly.add_port_group(data_pin=data_pin)
+        component = assembly.add_submodule(Bus1WireControllerComponent(ports))
         self._pipe = assembly.add_inout_pipe(component.o_stream, component.i_stream)
         self._clock = assembly.add_clock_divisor(component.divisor,
-            ref_period=assembly.sys_clk_period * 4, name="scl")
+            ref_period=assembly.sys_clk_period * 4, name="wierd_4_clock")
+        self._pulsetimer_value = assembly.add_rw_register(component.pulsetimer_value)
 
         self._multi = False
         self._busy  = False
@@ -163,7 +165,7 @@ class I2CControllerInterface:
             items = items[count:]
 
     def _log(self, message, *args):
-        self._logger.log(self._level, "I²C: " + message, *args)
+        self._logger.log(self._level, "1-wire: " + message, *args)
 
     async def _command(self, cmd: _Command, *, send: bytes | bytearray, recv: int) -> memoryview:
         await self._pipe.send([cmd.value])
@@ -283,7 +285,7 @@ class I2CControllerInterface:
         assert address in range(0, 128)
 
         async with self._do_operation():
-            await self._do_addr(address, read=False)
+            # await self._do_addr(address, read=False)
             await self._do_write(data)
 
     async def read(self, address: int, count: int) -> bytes:
@@ -302,7 +304,7 @@ class I2CControllerInterface:
         assert address in range(0, 128) and count >= 1
 
         async with self._do_operation():
-            await self._do_addr(address, read=True)
+            # await self._do_addr(address, read=True)
             return await self._do_read(count)
 
     async def ping(self, address: int) -> bool:
@@ -363,11 +365,11 @@ class I2CControllerInterface:
         return (manufacturer, part_ident, revision)
 
 
-class I2CControllerApplet(GlasgowAppletV2):
+class Bus1WireControllerApplet(GlasgowAppletV2):
     logger = logging.getLogger(__name__)
-    help = "initiate I²C transactions"
+    help = "initiate 1-wire transactions"
     description = """
-    Initiate transactions on the I²C bus.
+    Initiate transactions on the 1-wire bus.
 
     The following optional bus features are supported:
 
@@ -379,47 +381,62 @@ class I2CControllerApplet(GlasgowAppletV2):
     @classmethod
     def add_build_arguments(cls, parser, access):
         access.add_voltage_argument(parser)
-        access.add_pins_argument(parser, "scl", default=True, required=True)
-        access.add_pins_argument(parser, "sda", default=True, required=True)
+        access.add_pins_argument(parser, "data_pin", default=True, required=True)
 
     def build(self, args):
         with self.assembly.add_applet(self):
             self.assembly.use_voltage(args.voltage)
-            self.i2c_iface = I2CControllerInterface(self.logger, self.assembly,
-                scl=args.scl, sda=args.sda)
+            self._1wire_iface = Bus1WireControllerInterface(self.logger, self.assembly,
+                data_pin=args.data_pin)
 
     @classmethod
     def add_setup_arguments(cls, parser):
         parser.add_argument(
             "-f", "--frequency", metavar="FREQ", type=int, default=100,
-            help="set SCL frequency to FREQ kHz (default: %(default)s, range: 100...4000)")
+            help="set frequency to FREQ kHz (default: %(default)s, range: 100...4000)")
 
     async def setup(self, args):
-        await self.i2c_iface.clock.set_frequency(args.frequency * 1000)
+        await self._1wire_iface.clock.set_frequency(args.frequency * 1000)
 
     @classmethod
     def add_run_arguments(cls, parser):
         p_operation = parser.add_subparsers(dest="operation", metavar="OPERATION", required=True)
 
-        p_scan = p_operation.add_parser(
-            "scan", help="scan all possible I2C addresses")
-        p_scan.add_argument(
-            "--device-id", action="store_true", default=False,
-            help="read device ID from devices responding to scan")
+        # p_scan = p_operation.add_parser(
+        #     "scan", help="scan all possible I2C addresses")
+        # p_scan.add_argument(
+        #     "--device-id", action="store_true", default=False,
+        #     help="read device ID from devices responding to scan")
+        writecommand1 = p_operation.add_parser(
+            "write1", help="write a 1 bit"
+        )
+        writecommand0 = p_operation.add_parser(
+            "write0", help="write a 0 bit"
+        )
+
 
     async def run(self, args):
-        if args.operation == "scan":
-            for addr in await self.i2c_iface.scan():
-                self.logger.info(f"scan found address {addr:#09b}/{addr:#04x}")
-                if args.device_id:
-                    try:
-                        manufacturer, part_ident, revision = await self.i2c_iface.device_id(addr)
-                        self.logger.info("device %s ID: manufacturer %s, part %s, revision %s",
-                            bin(addr), bin(manufacturer), bin(part_ident), bin(revision))
-                    except I2CNotAcknowledged:
-                        self.logger.warning("device %s did not acknowledge Device ID", bin(addr))
+        # if args.operation == "scan":
+        #     for addr in await self._1wire_iface.scan():
+        #         self.logger.info(f"scan found address {addr:#09b}/{addr:#04x}")
+        #         if args.device_id:
+        #             try:
+        #                 manufacturer, part_ident, revision = await self.i2c_iface.device_id(addr)
+        #                 self.logger.info("device %s ID: manufacturer %s, part %s, revision %s",
+        #                     bin(addr), bin(manufacturer), bin(part_ident), bin(revision))
+        #             except I2CNotAcknowledged:
+        #                 self.logger.warning("device %s did not acknowledge Device ID", bin(addr))
+        if "write" in args.operation:
+            while(1):
+                if "1" in args.operation:
+                    await self._1wire_iface.write(1,b"\x01")
+                    self.logger.info("sent 1")
 
-    @classmethod
-    def tests(cls):
-        from . import test
-        return test.I2CControllerAppletTestCase
+                else:
+                    await self._1wire_iface.write(1,b"\x00")
+                    self.logger.info("sent 0")
+                time.sleep(1)
+    # @classmethod
+    # def tests(cls):
+    #     from . import test
+    #     return test.Bus1WireMasterAppletTestCase
