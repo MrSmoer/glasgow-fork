@@ -15,7 +15,7 @@ from glasgow.abstract import AbstractAssembly, GlasgowPin, PullState, ClockDivis
 from glasgow.gateware._1wire import Bus1WireController
 from glasgow.applet import GlasgowAppletError, GlasgowAppletV2
 
-__all__ = ["Bus1WireControllerInterface", "PullState"]
+__all__ = ["Bus1WireControllerInterface", "PullState","I2CNotAcknowledged", "Bus1WireControllerComponent"]
 
 
 class I2CNotAcknowledged(GlasgowAppletError):
@@ -38,13 +38,14 @@ class Bus1WireControllerComponent(wiring.Component):
 
     def __init__(self, ports):
         self._ports = ports
-
+        self.ctrl = Bus1WireController(self._ports, 0, 2)
         super().__init__()
 
     def elaborate(self, platform):
         m = Module()
 
-        m.submodules.ctrl = ctrl = Bus1WireController(self._ports, 0, 2)
+        m.submodules.ctrl = self.ctrl
+        ctrl = self.ctrl
         m.d.comb += ctrl.bus.divisor.eq(self.divisor)
         m.d.comb += ctrl.pulsetimer_value.eq(self.pulsetimer_value)
 
@@ -96,19 +97,22 @@ class Bus1WireControllerComponent(wiring.Component):
                     m.next = "WRITE-ACK"
 
             with m.State("WRITE-ACK"):
+                # m.next = "REPORT"
                 with m.If(~ctrl.busy):
+                    # m.next = "REPORT"
                     # with m.If(ctrl.ack_o):
                     m.d.sync += count.eq(count - 1)
                     m.next = "WRITE"
 
             with m.State("WRITE"):
-                with m.If((count == 0)):
-                    m.next = "REPORT"
-                with m.Elif(self.i_stream.valid):
-                    m.d.comb += self.i_stream.ready.eq(1)
-                    m.d.comb += ctrl.data_o.eq(self.i_stream.payload[0])
-                    m.d.comb += ctrl.write.eq(1)
-                    m.next = "WRITE-ACK"
+                m.next = "REPORT"
+                # with m.If((count == 0)):
+                #     m.next = "REPORT"
+                # with m.Elif(self.i_stream.valid):
+                #     m.d.comb += self.i_stream.ready.eq(1)
+                #     m.d.comb += ctrl.data_o.eq(self.i_stream.payload[0])
+                #     m.d.comb += ctrl.write.eq(1)
+                #     m.next = "WRITE-ACK"
 
             with m.State("REPORT"):
                 word = Signal(range(2))
@@ -429,7 +433,7 @@ class Bus1WireControllerApplet(GlasgowAppletV2):
         if "write" in args.operation:
             while(1):
                 if "1" in args.operation:
-                    await self._1wire_iface.write(1,b"\x01")
+                    await self._1wire_iface.write(1,b"\x01\x02")
                     self.logger.info("sent 1")
 
                 else:

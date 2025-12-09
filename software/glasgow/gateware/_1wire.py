@@ -118,9 +118,9 @@ class Bus1WireController(Elaboratable):
         self.pulsetimer = int(pulsetimer)
 
         self.busy   = Signal(init=0)
-        self.read   = Signal()
+        self.read   = Signal(init=0)
         self.data_i = Signal()
-        self.write  = Signal()
+        self.write  = Signal(init=0)
         self.data_o = Signal()
 
         self.requested_type = Signal()
