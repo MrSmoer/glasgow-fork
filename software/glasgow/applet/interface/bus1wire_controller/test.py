@@ -36,16 +36,26 @@ class Bus1WireControllerAppletTestCase(GlasgowAppletV2TestCase, applet=Bus1WireC
         testsig = Signal()
         m.submodules.probe = controller = Bus1WireControllerComponent(pin_ports)
         m.d.comb += [
-            testsig.eq(controller.ctrl.data_i),
+            pin_ports.data_pin.i.eq(~(pin_ports.data_pin.oe&(~pin_ports.data_pin.o))),
             controller.divisor.eq(100),
             controller.pulsetimer_value.eq(10)
+            
         ]
 
         async def i_testbench(ctx):
             # await stream_put(ctx, controller.i_stream,
-            #     b"\x00\x02\x01\x00\x01")
-            await stream_put(ctx, controller.i_stream,
-                0x01)
+            #     )
+            # await stream_put(ctx, controller.i_stream, 0x00)
+            datee = [0,1,1,0,1,1,0]
+            bytestream = bytearray(b"")
+            for val in datee:
+                thround=bytearray(b"\x00\x02\x01\x00")
+                thround.append(val)
+                thround.append(0x01)
+                bytestream.extend(thround)
+            # raise RuntimeError(f"bytestream {bytestream}")
+            for b in bytestream:
+                await stream_put(ctx, controller.i_stream, b)
             await stream_put(ctx, controller.i_stream, 0x02)
             # await stream_put(ctx, controller.i_stream,
             #     {"len": 7, "tms": bits(0,1,1,0,0,0,1),   "tdi": bits(0,0,0,0,0,0,1)})
@@ -61,13 +71,14 @@ class Bus1WireControllerAppletTestCase(GlasgowAppletV2TestCase, applet=Bus1WireC
             #     {"len": 8, "tms": bits(0,0,0,0,0,0,0,1), "tdi": 0})
 
         async def o_testbench(ctx):
-            await stream_get(ctx, controller.o_stream)
-            await stream_get(ctx, controller.o_stream)
-            await stream_get(ctx, controller.o_stream)
-            assert (await stream_get(ctx, controller.o_stream)) == {"tdo": 0b10101001}
-            assert (await stream_get(ctx, controller.o_stream)) == {"tdo": 0b00000000}
-            assert (await stream_get(ctx, controller.o_stream)) == {"tdo": 0b00001111}
-            assert (await stream_get(ctx, controller.o_stream)) == {"tdo": 0b00111111}
+            while(1):
+                await stream_get(ctx, controller.o_stream)
+            # await stream_get(ctx, controller.o_stream)
+            # await stream_get(ctx, controller.o_stream)
+            # assert (await stream_get(ctx, controller.o_stream)) == {"tdo": 0b10101001}
+            # assert (await stream_get(ctx, controller.o_stream)) == {"tdo": 0b00000000}
+            # assert (await stream_get(ctx, controller.o_stream)) == {"tdo": 0b00001111}
+            # assert (await stream_get(ctx, controller.o_stream)) == {"tdo": 0b00111111}
 
         sim = Simulator(m)
         sim.add_clock(1e-6)

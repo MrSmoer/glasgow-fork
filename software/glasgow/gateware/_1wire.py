@@ -141,7 +141,7 @@ class Bus1WireController(Elaboratable):
         # timer = Signal.like(self.divisor)
         with m.FSM(init="IDLE") as fsm:
             self._fsm = fsm
-
+            m.d.comb += self.bus.data_pin_o.eq(1)
             with m.State("IDLE"):
                 with m.If(self.read):
                     m.d.sync += self.busy.eq(1)

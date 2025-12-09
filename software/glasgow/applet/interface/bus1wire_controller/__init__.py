@@ -35,7 +35,6 @@ class Bus1WireControllerComponent(wiring.Component):
     divisor: In(16)
     pulsetimer_value: In(16, init = 10)
 
-
     def __init__(self, ports):
         self._ports = ports
         self.ctrl = Bus1WireController(self._ports, 0, 2)
@@ -105,14 +104,14 @@ class Bus1WireControllerComponent(wiring.Component):
                     m.next = "WRITE"
 
             with m.State("WRITE"):
-                m.next = "REPORT"
-                # with m.If((count == 0)):
-                #     m.next = "REPORT"
-                # with m.Elif(self.i_stream.valid):
-                #     m.d.comb += self.i_stream.ready.eq(1)
-                #     m.d.comb += ctrl.data_o.eq(self.i_stream.payload[0])
-                #     m.d.comb += ctrl.write.eq(1)
-                #     m.next = "WRITE-ACK"
+                # m.next = "REPORT"
+                with m.If((count == 0)):
+                    m.next = "REPORT"
+                with m.Elif(self.i_stream.valid):
+                    m.d.comb += self.i_stream.ready.eq(1)
+                    m.d.comb += ctrl.data_o.eq(self.i_stream.payload[0])
+                    m.d.comb += ctrl.write.eq(1)
+                    m.next = "WRITE-ACK"
 
             with m.State("REPORT"):
                 word = Signal(range(2))
