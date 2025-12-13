@@ -26,6 +26,7 @@ class _Command(enum.Enum, shape=8):
     Stop  = 0x01
     Write = 0x02
     Read  = 0x03
+    Reset = 0x04
 
 
 class Bus1WireControllerComponent(wiring.Component):
@@ -45,8 +46,8 @@ class Bus1WireControllerComponent(wiring.Component):
 
         m.submodules.ctrl = self.ctrl
         ctrl = self.ctrl
-        m.d.comb += ctrl.bus.divisor.eq(self.divisor)
-        m.d.comb += ctrl.pulsetimer_value.eq(self.pulsetimer_value)
+        m.d.comb += ctrl.divisor.eq(self.divisor)
+        # m.d.comb += ctrl.controller_timer_reset.eq(self.pulsetimer_value)
 
         cmd   = Signal(_Command)
         count = Signal(16)
@@ -68,6 +69,8 @@ class Bus1WireControllerComponent(wiring.Component):
                         m.next = "SYNC"
                     with m.Case(_Command.Write, _Command.Read):
                         m.next = "COUNT"
+                    with m.Case(_Command.Reset):
+                        m.next = "RESET-FIRST"
 
             with m.State("SYNC"):
                 with m.If(~ctrl.busy):
@@ -87,6 +90,7 @@ class Bus1WireControllerComponent(wiring.Component):
                                 m.next = "WRITE-FIRST"
                             with m.Case(_Command.Read):
                                 m.next = "READ-FIRST"
+
 
             with m.State("WRITE-FIRST"):
                 with m.If(self.i_stream.valid):
@@ -123,6 +127,12 @@ class Bus1WireControllerComponent(wiring.Component):
                         m.d.sync += count.eq(0)
                         m.next = "IDLE"
 
+
+            with m.State("RESET-FIRST"):
+                m.d.comb += ctrl.reset.eq(1)
+                m.d.sync += count.eq(0)
+                m.next = "READ"
+
             with m.State("READ-FIRST"):
                 # m.d.comb += ctrl.ack_i.eq(count != 1)
                 m.d.comb += ctrl.read.eq(1)
@@ -155,7 +165,7 @@ class Bus1WireControllerInterface:
         component = assembly.add_submodule(Bus1WireControllerComponent(ports))
         self._pipe = assembly.add_inout_pipe(component.o_stream, component.i_stream)
         self._clock = assembly.add_clock_divisor(component.divisor,
-            ref_period=assembly.sys_clk_period * 4, name="wierd_4_clock")
+            ref_period=assembly.sys_clk_period, name="wierd_4_clock")
         self._pulsetimer_value = assembly.add_rw_register(component.pulsetimer_value)
 
         self._multi = False
@@ -188,6 +198,17 @@ class Bus1WireControllerInterface:
         self._log("stop")
         await self._command(_Command.Stop, send=b"", recv=1)
         self._busy = False
+    
+    async def _do_reset(self):
+        if not self._busy:
+            self._log("reset")
+        else:
+            self._log("busy-reset")
+        presence = struct.unpack("<B",
+                await self._command(_Command.Reset, send=b"", recv=1))
+        self._log("presence=<%x>", presence[0])
+        return presence
+    
 
     async def _do_addr(self, address: int, *, read: bool) -> bool:
         if read:
@@ -291,6 +312,14 @@ class Bus1WireControllerInterface:
             # await self._do_addr(address, read=False)
             await self._do_write(data)
 
+    async def reset(self):
+        """Reset the 1-wire Bus.
+        
+        Generates Reset pulse and returns a presence response
+        """
+        async with self._do_operation():
+            await self._do_reset()
+
     async def read(self, address: int, count: int) -> bytes:
         """Read bytes.
 
@@ -367,6 +396,7 @@ class Bus1WireControllerInterface:
         revision     = device_id[2] & 0x7
         return (manufacturer, part_ident, revision)
 
+import time
 
 class Bus1WireControllerApplet(GlasgowAppletV2):
     logger = logging.getLogger(__name__)
@@ -417,6 +447,9 @@ class Bus1WireControllerApplet(GlasgowAppletV2):
             "write0", help="write a 0 bit"
         )
 
+        reset = p_operation.add_parser(
+            "reset", help="send a reset to the bus"
+        )
 
     async def run(self, args):
         # if args.operation == "scan":
@@ -432,13 +465,16 @@ class Bus1WireControllerApplet(GlasgowAppletV2):
         if "write" in args.operation:
             while(1):
                 if "1" in args.operation:
-                    await self._1wire_iface.write(1,b"\x01\x02")
+                    await self._1wire_iface.write(1,b"\x01\x01\x00\x01")
                     self.logger.info("sent 1")
 
                 else:
                     await self._1wire_iface.write(1,b"\x00")
                     self.logger.info("sent 0")
                 time.sleep(1)
+        elif "reset" in args.operation:
+            print("resetting")
+            await self._1wire_iface.reset()
     # @classmethod
     # def tests(cls):
     #     from . import test

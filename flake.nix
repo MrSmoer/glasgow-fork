@@ -16,11 +16,16 @@
       in
       {
         packages = rec {
-          glasgow = pkgs.glasgow.overrideAttrs {
+          glasgow = pkgs.glasgow.overridePythonAttrs (previousAttrs: {
+            # LIBFX2 = "${pkgs.python3.pkgs.fx2}/share/libfx2";
+            YOSYS = "${lib.getBin pkgs.yosys}/bin/yosys";
+            ICEPACK = "${lib.getBin pkgs.icestorm}/bin/icepack";
+            NEXTPNR_ICE40 = "${lib.getBin pkgs.nextpnr}/bin/nextpnr-ice40";
             version = "0+unstable-1-wire-eeprom";
             src = ./.;
+            nativeBuildInputs = previousAttrs.nativeBuildInputs ++ [pkgs.pdm];
             doInstallCheck = false;
-          };
+          });
           default = glasgow;
         };
 
@@ -64,3 +69,7 @@
       }
     );
 }
+
+
+#pdm test glasgow.applet.interface.bus1wire_controller.test.Bus1WireControllerAppletTestCase.testreset
+#pdm run glasgow run
