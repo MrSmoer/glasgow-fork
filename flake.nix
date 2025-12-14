@@ -73,3 +73,4 @@
 
 #pdm test glasgow.applet.interface.bus1wire_controller.test.Bus1WireControllerAppletTestCase.testreset
 #pdm run glasgow run
+#pdm run glasgow -vv run 1wire-controller -V 3.3 -f8 --data-pin A1 write1

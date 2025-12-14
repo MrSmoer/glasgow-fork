@@ -310,6 +310,7 @@ class Bus1WireControllerInterface:
 
         async with self._do_operation():
             # await self._do_addr(address, read=False)
+            # await self._do_reset()
             await self._do_write(data)
 
     async def reset(self):
@@ -397,7 +398,6 @@ class Bus1WireControllerInterface:
         return (manufacturer, part_ident, revision)
 
 import time
-
 class Bus1WireControllerApplet(GlasgowAppletV2):
     logger = logging.getLogger(__name__)
     help = "initiate 1-wire transactions"
@@ -465,8 +465,20 @@ class Bus1WireControllerApplet(GlasgowAppletV2):
         if "write" in args.operation:
             while(1):
                 if "1" in args.operation:
-                    await self._1wire_iface.write(1,b"\x01\x01\x00\x01")
+                    data = b"\x33"
+                    bits = []
+                    for k in data:
+                        for i in range(8):
+                            bits.append( (k>>i)&1)
+                    
+                    msg = [b"\x01" if bit == 1 else b"\x00" for bit in bits ]
+                    await self._1wire_iface.reset()
+                    # await self._1wire_iface.write(1,b"\x01\x01\x00\x01")
+                    await self._1wire_iface.write(1,b"".join(msg))
                     self.logger.info("sent 1")
+
+                    out = await self._1wire_iface.read(1,64)
+                    print(out)
 
                 else:
                     await self._1wire_iface.write(1,b"\x00")

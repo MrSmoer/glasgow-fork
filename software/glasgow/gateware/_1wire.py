@@ -58,20 +58,17 @@ class Bus1Wire(Elaboratable):
         ]
 
 
-        with m.If( (0 == self.timersource) & (self.timer == 0) & self.falling_edge_strobe):
+        with m.If((self.timer == 0) & self.falling_edge_strobe):
             m.d.sync += self.timer.eq(self.divisor)
-        with m.Elif((self.timer==0)):
-            m.d.sync += self.timer.eq(self.divisor2)
         with m.Elif(self.timer != 0):
             m.d.sync += self.timer.eq(self.timer - 1)
 
         # Sampling should happen one quarter into the shortest window-size
-        with m.If(self.timer == (self.divisor - self.divisor // 4)):
+        with m.If(self.timer == (self.divisor - (self.divisor >> 3))):
             m.d.sync += self.data_i.eq(self.data_pin_i)
             m.d.sync += self.data_ready.eq(1)
         with m.Else():
             m.d.sync += self.data_ready.eq(0)
-
 
 
         with m.If(self.data_pin_i == 1):
@@ -139,7 +136,7 @@ class Bus1WireController(Elaboratable):
 
         self.bus = Bus1Wire(pads, period_cyc)
 
-        self.controller_timer = Signal(16, init = 0)
+        self.controller_timer = Signal(24, init = 0)
         self.controller_timer_reset = Signal.like(self.controller_timer)
 
 
@@ -157,7 +154,7 @@ class Bus1WireController(Elaboratable):
             m.d.sync += self.controller_timer.eq(self.controller_timer - 1)
             
 
-
+        timdown = Signal(init=0)
         # timer = Signal.like(self.divisor)
         with m.FSM(init="IDLE") as fsm:
             self._fsm = fsm
@@ -183,11 +180,12 @@ class Bus1WireController(Elaboratable):
 
             with m.State("PULSE"):
                 m.d.comb += self.bus.data_pin_o.eq(0)
-                m.d.sync += self.controller_timer_reset.eq(self.divisor>>4)
+                m.d.sync += self.controller_timer_reset.eq(self.divisor>>5)
                 m.next = "PULSE_WAIT"
 
             with m.State("PULSE_WAIT"):
-                with m.If((self.controller_timer == 0)& (self.controller_timer_reset == 0)):
+                m.d.comb += self.bus.data_pin_o.eq(0)
+                with m.If((self.controller_timer == 0) & (self.controller_timer_reset == 0)):
                     with m.If(self.requested_type):
                         m.next = "WRITING"
                     with m.Else():
@@ -201,7 +199,7 @@ class Bus1WireController(Elaboratable):
 
             with m.State("WRITING"):
                 m.d.comb += self.bus.data_pin_o.eq(self.bus.data_o)
-                with m.If(self.bus.timer == 42):
+                with m.If(self.bus.timer == ((self.divisor>>1))): #+(self.divisor>>3)
                     m.next = "WAITING"
 
             with m.State("WAITING"):
@@ -212,11 +210,12 @@ class Bus1WireController(Elaboratable):
             with m.State("RESET"):
                 m.d.comb += self.bus.data_pin_o.eq(0)
                 m.d.sync += self.controller_timer_reset.eq(self.divisor*8)
+                m.d.sync += timdown.eq(0)
                 m.next = "RESETTING"
 
             with m.State("RESETTING"):
                 m.d.comb += self.bus.data_pin_o.eq(0)
-                timdown = Signal(init=0)
+                
 
                 with m.If(((self.controller_timer == 0) & (self.controller_timer_reset == 0)) | timdown):
                     m.d.sync += timdown.eq(1)
