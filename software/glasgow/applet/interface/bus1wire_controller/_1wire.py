@@ -41,9 +41,7 @@ class Bus1Wire(Elaboratable):
 
         
         reset_timer = Signal.like(self.reset_timeout, init = -1)
-        
 
-        
         delayed_data_pin_i = Signal()
 
         m.d.sync += [
@@ -132,8 +130,6 @@ class Bus1WireController(Elaboratable):
 
         self.requested_type = Signal()
 
-        self.strobe = Signal()
-
         self.bus = Bus1Wire(pads, period_cyc)
 
         self.controller_timer = Signal(24, init = 0)
@@ -162,7 +158,6 @@ class Bus1WireController(Elaboratable):
             with m.State("IDLE"):
                 with m.If(self.reset | self.read | self.write):
                     m.d.sync += self.busy.eq(1)
-
                     with m.If(self.reset):
                         m.next = "RESET"
 
@@ -174,9 +169,10 @@ class Bus1WireController(Elaboratable):
                         m.d.sync += self.bus.data_o.eq(self.data_o)
                         m.d.sync += self.requested_type.eq(1)
                         m.next = "PULSE"
+
                 with m.Else():
                     m.d.sync += self.busy.eq(0)
-                
+
 
             with m.State("PULSE"):
                 m.d.comb += self.bus.data_pin_o.eq(0)
@@ -199,7 +195,7 @@ class Bus1WireController(Elaboratable):
 
             with m.State("WRITING"):
                 m.d.comb += self.bus.data_pin_o.eq(self.bus.data_o)
-                with m.If(self.bus.timer == ((self.divisor>>1))): #+(self.divisor>>3)
+                with m.If(self.bus.timer == ((self.divisor>>1))):
                     m.next = "WAITING"
 
             with m.State("WAITING"):
@@ -215,7 +211,6 @@ class Bus1WireController(Elaboratable):
 
             with m.State("RESETTING"):
                 m.d.comb += self.bus.data_pin_o.eq(0)
-                
 
                 with m.If(((self.controller_timer == 0) & (self.controller_timer_reset == 0)) | timdown):
                     m.d.sync += timdown.eq(1)

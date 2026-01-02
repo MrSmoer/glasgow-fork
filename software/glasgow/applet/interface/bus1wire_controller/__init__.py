@@ -12,7 +12,7 @@ from amaranth.lib.wiring import In, Out
 
 from glasgow.support.logging import dump_hex
 from glasgow.abstract import AbstractAssembly, GlasgowPin, PullState, ClockDivisor
-from glasgow.gateware._1wire import Bus1WireController
+from glasgow.applet.interface.bus1wire_controller._1wire import Bus1WireController
 from glasgow.applet import GlasgowAppletError, GlasgowAppletV2
 
 __all__ = ["Bus1WireControllerInterface", "PullState","I2CNotAcknowledged", "Bus1WireControllerComponent"]
@@ -22,8 +22,7 @@ class I2CNotAcknowledged(GlasgowAppletError):
     pass
 
 class _Command(enum.Enum, shape=8):
-    Start = 0x00
-    Stop  = 0x01
+    Sync = 0x00
     Write = 0x02
     Read  = 0x03
     Reset = 0x04
@@ -61,11 +60,8 @@ class Bus1WireControllerComponent(wiring.Component):
 
             with m.State("COMMAND"):
                 with m.Switch(cmd):
-                    with m.Case(_Command.Start):
+                    with m.Case(_Command.Sync):
                         # m.d.comb += ctrl.start.eq(1)
-                        m.next = "SYNC"
-                    with m.Case(_Command.Stop):
-                        # m.d.comb += ctrl.stop.eq(1)
                         m.next = "SYNC"
                     with m.Case(_Command.Write, _Command.Read):
                         m.next = "COUNT"
@@ -100,15 +96,12 @@ class Bus1WireControllerComponent(wiring.Component):
                     m.next = "WRITE-ACK"
 
             with m.State("WRITE-ACK"):
-                # m.next = "REPORT"
                 with m.If(~ctrl.busy):
-                    # m.next = "REPORT"
                     # with m.If(ctrl.ack_o):
                     m.d.sync += count.eq(count - 1)
                     m.next = "WRITE"
 
             with m.State("WRITE"):
-                # m.next = "REPORT"
                 with m.If((count == 0)):
                     m.next = "REPORT"
                 with m.Elif(self.i_stream.valid):
@@ -133,8 +126,8 @@ class Bus1WireControllerComponent(wiring.Component):
                 m.d.sync += count.eq(0)
                 m.next = "READ"
 
+# this can prolly be reduced
             with m.State("READ-FIRST"):
-                # m.d.comb += ctrl.ack_i.eq(count != 1)
                 m.d.comb += ctrl.read.eq(1)
                 m.d.sync += count.eq(count - 1)
                 m.next = "READ"
@@ -147,7 +140,6 @@ class Bus1WireControllerComponent(wiring.Component):
                         with m.If(count == 0):
                             m.next = "IDLE"
                         with m.Else():
-                            # m.d.comb += ctrl.ack_i.eq(count != 1)
                             m.d.comb += ctrl.read.eq(1)
                             m.d.sync += count.eq(count - 1)
 
@@ -171,6 +163,21 @@ class Bus1WireControllerInterface:
         self._multi = False
         self._busy  = False
 
+    def bytes_to_bits(self, data: bytes) -> bytes:
+        return b"".join([b"\x01" if d&(1<<i) else b"\x00" for d in data for i in range(8)])
+
+    def bits_to_bytes(self, bits: bytes) -> bytearray:
+        res = bytearray()
+        curval = 0
+        for i, bit in enumerate(bits):
+            curval |= bit << (i % 8)
+            if (i % 8) == 7:
+                res.append(curval)
+                curval = 0
+        if (len(bits)%8) != 0:
+            res.append(curval)
+        return bytes(res)
+
     @staticmethod
     def _chunked(items, *, count=0xffff):
         while items:
@@ -186,18 +193,13 @@ class Bus1WireControllerInterface:
         await self._pipe.flush()
         return await self._pipe.recv(recv)
 
-    async def _do_start(self):
+    async def _do_sync(self):
         if not self._busy:
             self._log("start")
         else:
             self._log("rep-start")
-        await self._command(_Command.Start, send=b"", recv=1)
+        await self._command(_Command.Sync, send=b"", recv=1)
         self._busy = True
-
-    async def _do_stop(self):
-        self._log("stop")
-        await self._command(_Command.Stop, send=b"", recv=1)
-        self._busy = False
     
     async def _do_reset(self):
         if not self._busy:
@@ -210,18 +212,14 @@ class Bus1WireControllerInterface:
         return presence
     
 
-    async def _do_addr(self, address: int, *, read: bool) -> bool:
-        if read:
-            self._log(f"read addr={address:#09b}")
+    async def _do_addr(self, address: int|None) -> bool:
+        if not address:
+            report = await self._do_write(self.bytes_to_bits(b"\xcc"))
         else:
-            self._log(f"write addr={address:#09b}")
-        unacked, = struct.unpack("<H",
-            await self._command(_Command.Write,
-                send=struct.pack("<HB", 1, (address << 1) | read),
-                recv=2))
-        if unacked:
-            raise I2CNotAcknowledged(
-                f"address {address:#09b} ({'read' if read else 'write'}) not acknowledged")
+            data = b"\x55"+self.bytes_to_bits(address.to_bytes('little'))
+            self._log(f"matching rom={address:#064b}")
+            await self._do_write(data)
+
 
     async def _do_write(self, data: bytes | bytearray | memoryview) -> int:
         self._log("write data=<%s>", dump_hex(data))
@@ -250,17 +248,27 @@ class Bus1WireControllerInterface:
 
     @contextlib.asynccontextmanager
     async def _do_operation(self):
-        await self._do_start()
+        await self._do_sync()
         try:
             yield
         finally:
             if not self._multi:
-                await self._do_stop()
+                await self._do_sync()
 
     @property
     def clock(self) -> ClockDivisor:
         """SCL clock divisor."""
         return self._clock
+
+    @contextlib.asynccontextmanager
+    async def select_rom(self, addr):
+        await self._do_reset()
+        await self._do_addr(addr)
+        try:
+            yield
+        finally:
+            await  self._do_sync()
+
 
     @contextlib.asynccontextmanager
     async def transaction(self):
@@ -292,11 +300,11 @@ class Bus1WireControllerInterface:
             yield
         finally:
             if self._busy:
-                await self._do_stop()
+                await self._do_sync()
             self._multi = False
 
     async def write(self, address: int, data: bytes | bytearray | memoryview):
-        """Write bytes.
+        """Write bits.
 
         Generates a START condition followed by a WRITE target address (:py:`(address << 1) | 0`),
         writes data, then generates a STOP condition (unless used within a transaction).
@@ -306,11 +314,7 @@ class Bus1WireControllerInterface:
         I2CNotAcknowledged
             If either the target address or the written data receives a not-acknowledgement.
         """
-        assert address in range(0, 128)
-
         async with self._do_operation():
-            # await self._do_addr(address, read=False)
-            # await self._do_reset()
             await self._do_write(data)
 
     async def reset(self):
@@ -321,8 +325,8 @@ class Bus1WireControllerInterface:
         async with self._do_operation():
             await self._do_reset()
 
-    async def read(self, address: int, count: int) -> bytes:
-        """Read bytes.
+    async def read(self, count: int) -> bytes:
+        """Read bits.
 
         Generates a START condition followed by a READ target address (:py:`(address << 1) | 1`),
         reads data, then generates a STOP condition (unless used within a transaction).
@@ -334,31 +338,11 @@ class Bus1WireControllerInterface:
         I2CNotAcknowledged
             If the target address receives a not-acknowledgement.
         """
-        assert address in range(0, 128) and count >= 1
+        # assert address in range(0, 128) and count >= 1
 
         async with self._do_operation():
-            # await self._do_addr(address, read=True)
             return await self._do_read(count)
 
-    async def ping(self, address: int) -> bool:
-        """Check address for presence.
-
-        Generates a START condition followed by a WRITE target address, then generates a STOP
-        condition (unless used within a transaction). This is done using a :meth:`write` call
-        with no data.
-
-        Returns :py:`True` if the target adddress receives an acknowledgement, :py:`False`
-        otherwise.
-        """
-        assert address in range(0, 128)
-
-        try:
-            async with self._do_operation():
-                await self._do_addr(address, read=False)
-        except I2CNotAcknowledged:
-            return False
-        else:
-            return True
 
     async def scan(self, addresses: range = range(0b0001_000, 0b1111_000)) -> set[int]:
         """Scan address range for presence.
@@ -435,11 +419,6 @@ class Bus1WireControllerApplet(GlasgowAppletV2):
     def add_run_arguments(cls, parser):
         p_operation = parser.add_subparsers(dest="operation", metavar="OPERATION", required=True)
 
-        # p_scan = p_operation.add_parser(
-        #     "scan", help="scan all possible I2C addresses")
-        # p_scan.add_argument(
-        #     "--device-id", action="store_true", default=False,
-        #     help="read device ID from devices responding to scan")
         writecommand1 = p_operation.add_parser(
             "write1", help="write a 1 bit"
         )
@@ -477,7 +456,7 @@ class Bus1WireControllerApplet(GlasgowAppletV2):
                     await self._1wire_iface.write(1,b"".join(msg))
                     self.logger.info("sent 1")
 
-                    out = await self._1wire_iface.read(1,64)
+                    out = await self._1wire_iface.read(64)
                     print(out)
 
                 else:
